@@ -21,7 +21,7 @@
       padding: 10px;
     }
 
-    #rfidInput, #studentIdInput {
+    #rfidInput, #studentIdInput, #studentIdQueryInput {
       font-size: 40px;
       width: 60%;
     }
@@ -103,6 +103,14 @@
     .word-content table, .word-content th, .word-content td {
       border: 1px solid black;
     }
+    
+    .query-section {
+      margin: 20px 0;
+      padding: 15px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      background-color: #f9f9f9;
+    }
   </style>
 </head>
 <body>
@@ -140,8 +148,20 @@
 
   <hr />
   <h2>📅 查詢刷卡紀錄</h2>
-  <input type="date" id="queryDate" />
-  <button onclick="queryRecords()">查詢</button>
+  
+  <div class="query-section">
+    <h3>依日期查詢</h3>
+    <input type="date" id="queryDate" />
+    <button onclick="queryRecordsByDate()">查詢</button>
+  </div>
+  
+  <div class="query-section">
+    <h3>依學號查詢</h3>
+    <input type="text" id="studentIdQueryInput" placeholder="請輸入學號" />
+    <button onclick="queryRecordsByStudentId()">查詢</button>
+    <button onclick="clearStudentIdQuery()">清除</button>
+  </div>
+  
   <button onclick="window.print()">列印</button>
 
   <table id="recordsTable">
@@ -176,6 +196,7 @@
 
     const rfidInput = document.getElementById("rfidInput");
     const studentIdInput = document.getElementById("studentIdInput");
+    const studentIdQueryInput = document.getElementById("studentIdQueryInput");
     const status = document.getElementById("status");
     const successSound = document.getElementById("successSound");
     const errorSound = document.getElementById("errorSound");
@@ -187,6 +208,7 @@
     let latestRecordId = null;
     let highlightedNames = new Set();
     let originalWordHtml = "";
+    let currentQueryType = "date"; // "date" 或 "studentId"
 
     // RFID刷卡處理
     rfidInput.addEventListener("keydown", async function (event) {
@@ -202,6 +224,13 @@
     studentIdInput.addEventListener("keydown", async function (event) {
       if (event.key === "Enter") {
         await submitStudentId();
+      }
+    });
+
+    // 學號查詢輸入處理
+    studentIdQueryInput.addEventListener("keydown", async function (event) {
+      if (event.key === "Enter") {
+        await queryRecordsByStudentId();
       }
     });
 
@@ -264,7 +293,12 @@
           highlightNameInWord(studentName);
         }
 
-        await queryRecords();
+        // 根據當前查詢類型刷新記錄
+        if (currentQueryType === "date") {
+          await queryRecordsByDate();
+        } else {
+          await queryRecordsByStudentId();
+        }
 
         clearTimer = setTimeout(() => {
           status.textContent = "";
@@ -288,6 +322,101 @@
           status.className = "";
         }, 3000);
       }
+    }
+
+    // 依日期查詢記錄
+    async function queryRecordsByDate() {
+      currentQueryType = "date";
+      const dateStr = document.getElementById("queryDate").value;
+      if (!dateStr) {
+        const today = new Date();
+        const dateInput = document.getElementById("queryDate");
+        dateInput.valueAsDate = today;
+        return await queryRecordsByDate();
+      }
+
+      const date = new Date(dateStr);
+      const start = new Date(date.setHours(0, 0, 0, 0));
+      const end = new Date(date.setHours(23, 59, 59, 999));
+
+      const snapshot = await db.collection("rfid_records")
+        .where("timestamp", ">=", start)
+        .where("timestamp", "<=", end)
+        .orderBy("timestamp", "desc")
+        .get();
+
+      displayRecords(snapshot);
+    }
+
+    // 依學號查詢記錄
+    async function queryRecordsByStudentId() {
+      currentQueryType = "studentId";
+      const studentId = studentIdQueryInput.value.trim();
+      
+      if (!studentId) {
+        alert("請輸入學號");
+        return;
+      }
+
+      try {
+        const snapshot = await db.collection("rfid_records")
+          .where("studentId", "==", studentId)
+          .orderBy("timestamp", "desc")
+          .get();
+
+        if (snapshot.empty) {
+          status.textContent = `查無學號 ${studentId} 的刷卡記錄`;
+          status.className = "not-found";
+          setTimeout(() => {
+            status.textContent = "";
+            status.className = "";
+          }, 3000);
+        }
+
+        displayRecords(snapshot);
+      } catch (error) {
+        console.error("查詢失敗:", error);
+        status.textContent = "查詢失敗：" + error.message;
+        status.className = "error";
+        setTimeout(() => {
+          status.textContent = "";
+          status.className = "";
+        }, 3000);
+      }
+    }
+
+    // 清除學號查詢
+    function clearStudentIdQuery() {
+      studentIdQueryInput.value = "";
+      currentQueryType = "date";
+      queryRecordsByDate();
+    }
+
+    // 顯示記錄
+    function displayRecords(snapshot) {
+      const tbody = document.getElementById("recordsBody");
+      tbody.innerHTML = "";
+
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        const time = data.timestamp?.toDate().toLocaleString("zh-TW") || "無時間";
+        const inputType = data.inputType === "rfid" ? "RFID刷卡" : "學號輸入";
+
+        const row = document.createElement("tr");
+        if (doc.id === latestRecordId) {
+          row.classList.add("latest-record");
+        }
+        row.innerHTML = `
+          <td>${data.class || ""}</td>
+          <td>${data.studentId || ""}</td>
+          <td>${data.name || ""}</td>
+          <td>${time}</td>
+          <td>${inputType}</td>
+        `;
+        tbody.appendChild(row);
+      });
+      
+      latestRecordId = null;
     }
 
     // 載入Word文件並保留格式
@@ -355,102 +484,58 @@
 
     // 下載已標記的名冊
     async function downloadMarkedRoster() {
-  if (!wordViewer || wordViewer.innerHTML === "") {
-    downloadStatus.textContent = "沒有可下載的名冊";
-    return;
-  }
-
-  downloadStatus.textContent = "正在生成檔案...";
-  
-  try {
-    // 創建 Blob 對象 (HTML格式)
-    const content = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>已標記名冊</title>
-        <style>
-          body { font-family: "Microsoft JhengHei", Arial, sans-serif; }
-          table { border-collapse: collapse; width: 100%; }
-          th, td { border: 1px solid black; padding: 5px; text-align: center; }
-          .highlight-name { background-color: yellow; border: 2px solid red; }
-        </style>
-      </head>
-      <body>
-        ${wordViewer.innerHTML}
-      </body>
-      </html>
-    `;
-    
-    // 創建下載連結
-    const blob = new Blob([content], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `已標記名冊_${new Date().toLocaleDateString('zh-TW')}.html`;
-    document.body.appendChild(a);
-    a.click();
-    
-    // 清理
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      downloadStatus.textContent = "下載完成！";
-      setTimeout(() => { downloadStatus.textContent = ""; }, 3000);
-    }, 100);
-  } catch (error) {
-    console.error("生成檔案失敗:", error);
-    downloadStatus.textContent = "下載失敗: " + error.message;
-  }
-}
-
-    async function queryRecords() {
-      const dateStr = document.getElementById("queryDate").value;
-      if (!dateStr) {
-        const today = new Date();
-        const dateInput = document.getElementById("queryDate");
-        dateInput.valueAsDate = today;
-        return await queryRecords();
+      if (!wordViewer || wordViewer.innerHTML === "") {
+        downloadStatus.textContent = "沒有可下載的名冊";
+        return;
       }
 
-      const date = new Date(dateStr);
-      const start = new Date(date.setHours(0, 0, 0, 0));
-      const end = new Date(date.setHours(23, 59, 59, 999));
-
-      const snapshot = await db.collection("rfid_records")
-        .where("timestamp", ">=", start)
-        .where("timestamp", "<=", end)
-        .orderBy("timestamp", "desc")
-        .get();
-
-      const tbody = document.getElementById("recordsBody");
-      tbody.innerHTML = "";
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        const time = data.timestamp?.toDate().toLocaleTimeString("zh-TW") || "無時間";
-        const inputType = data.inputType === "rfid" ? "RFID刷卡" : "學號輸入";
-
-        const row = document.createElement("tr");
-        if (doc.id === latestRecordId) {
-          row.classList.add("latest-record");
-        }
-        row.innerHTML = `
-          <td>${data.class || ""}</td>
-          <td>${data.studentId || ""}</td>
-          <td>${data.name || ""}</td>
-          <td>${time}</td>
-          <td>${inputType}</td>
-        `;
-        tbody.appendChild(row);
-      });
+      downloadStatus.textContent = "正在生成檔案...";
       
-      latestRecordId = null;
+      try {
+        // 創建 Blob 對象 (HTML格式)
+        const content = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>已標記名冊</title>
+            <style>
+              body { font-family: "Microsoft JhengHei", Arial, sans-serif; }
+              table { border-collapse: collapse; width: 100%; }
+              th, td { border: 1px solid black; padding: 5px; text-align: center; }
+              .highlight-name { background-color: yellow; border: 2px solid red; }
+            </style>
+          </head>
+          <body>
+            ${wordViewer.innerHTML}
+          </body>
+          </html>
+        `;
+        
+        // 創建下載連結
+        const blob = new Blob([content], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `已標記名冊_${new Date().toLocaleDateString('zh-TW')}.html`;
+        document.body.appendChild(a);
+        a.click();
+        
+        // 清理
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          downloadStatus.textContent = "下載完成！";
+          setTimeout(() => { downloadStatus.textContent = ""; }, 3000);
+        }, 100);
+      } catch (error) {
+        console.error("生成檔案失敗:", error);
+        downloadStatus.textContent = "下載失敗: " + error.message;
+      }
     }
 
     window.onload = function() {
-      queryRecords();
+      queryRecordsByDate();
     };
   </script>
 </body>
